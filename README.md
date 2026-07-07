@@ -1,151 +1,121 @@
-# Lab 28: Full Platform Integration Sprint
+# Day 28 Lab
 
-Hybrid AI platform using:
-- Local Docker Compose for Kafka, Prefect, Redis, Qdrant, Prometheus, Grafana, and the FastAPI gateway
-- Kaggle for remote chat and embedding services exposed through a tunnel
+This repo is the working version I used to get the lab running on Windows with Docker Desktop and a Kaggle notebook.
 
-## Repository Layout
+## What is in here
 
-- `docker-compose.yml`: local platform stack
-- `api-gateway/`: FastAPI gateway
-- `prefect/flows/`: Kafka to Delta pipeline
-- `scripts/`: integration, observability, and readiness scripts
-- `smoke-tests/`: end-to-end smoke tests
-- `kaggle-day28.ipynb`: patched Kaggle notebook for the remote services
-- `LAB28_Huong_Dan.ipynb`: patched original lab notebook
-- `.agent/`: planning files
+- docker-compose.yml: local services
+- pi-gateway/: FastAPI gateway
+- prefect/flows/: Kafka to parquet flow
+- scripts/: small scripts for each integration step
+- smoke-tests/: end-to-end checks
+- kaggle-day28.ipynb: Kaggle notebook I used when package installs were unstable
 
-## Prerequisites
+## Before you start
+
+You need:
 
 - Docker Desktop running
-- Python 3.11 available locally
-- Kaggle notebook with internet enabled
-- ngrok token configured in Kaggle secrets as `NGROK_AUTH_TOKEN`
-- Valid LangSmith API key in local `.env`
+- a local .env in the repo root
+- Kaggle URLs already copied into .env
 
-## Local Environment
+The important .env values are:
 
-Create a local `.env` in the repository root with at least:
-
-```env
-VLLM_NGROK_URL=https://your-chat-tunnel.example
-EMBED_NGROK_URL=https://your-embed-tunnel.example
-LANGCHAIN_API_KEY=your_langsmith_key
+`env
+VLLM_NGROK_URL=...
+EMBED_NGROK_URL=...
+LANGCHAIN_API_KEY=...
 LANGCHAIN_PROJECT=lab28-platform
-MLFLOW_TRACKING_URI=
-MLFLOW_EXPERIMENT_NAME=lab28-integration
-MLFLOW_TRACKING_USERNAME=
-MLFLOW_TRACKING_PASSWORD=
 QDRANT_URL=http://qdrant:6333
 REDIS_URL=redis://redis:6379
-```
+`
 
-## Kaggle Notebook
+## Local Python
 
-Use `kaggle-day28.ipynb` if Kaggle package installation is unstable.
+Use the local virtual environment:
 
-Validated behavior:
-- remote chat endpoint exposed at `/v1/chat/completions`
-- remote embedding endpoint exposed at `/embed`
-
-After running the notebook, copy the printed tunnel URLs into `.env`:
-- `VLLM_NGROK_URL`
-- `EMBED_NGROK_URL`
-
-## Local Setup
-
-Create and use a local virtual environment:
-
-```powershell
+`powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r prefect\flows\requirements.txt redis qdrant-client requests python-dotenv pytest langsmith "numpy<2" "griffe<1"
-```
+`
 
-Start the local stack:
+## Start the stack
 
-```powershell
+`powershell
 docker compose up -d --build
-```
+`
 
-Services:
-- API Gateway: `http://localhost:8000`
-- Prefect UI: `http://localhost:4200`
-- Prometheus: `http://localhost:9090`
-- Grafana: `http://localhost:3000`
-- Qdrant: `http://localhost:6333`
+Main URLs:
 
-## Validated Execution Order
+- API Gateway: http://localhost:8000
+- Prefect: http://localhost:4200
+- Prometheus: http://localhost:9090
+- Grafana: http://localhost:3000
+- Qdrant: http://localhost:6333
 
-### 1. Ingest sample data to Kafka
+## Run order
 
-```powershell
+### 1. Send sample data to Kafka
+
+`powershell
 .\.venv\Scripts\python.exe scripts\01_ingest_to_kafka.py
-```
+`
 
-Note:
-- On this Windows environment, direct `kafka-python` producer access is unreliable.
-- The script falls back to `docker compose exec kafka ... kafka-console-producer`.
+### 2. Move Kafka data into parquet
 
-### 2. Run Kafka to Delta
+On this machine, the reliable way is to run it inside the worker container:
 
-Validated path:
-
-```powershell
+`powershell
 docker compose exec -T prefect-worker sh -lc "python -m pip install kafka-python pandas pyarrow >/tmp/pip-prefect.log 2>&1 && python /opt/prefect/flows/kafka_to_delta.py"
-```
+`
 
-This writes parquet files into `delta-lake/raw/`.
+That creates parquet files under delta-lake/raw/.
 
-### 3. Push Delta records to Redis
+### 3. Load features into Redis
 
-```powershell
+`powershell
 .\.venv\Scripts\python.exe scripts\03_delta_to_feast.py
-```
+`
 
-### 4. Push embeddings to Qdrant
+### 4. Load vectors into Qdrant
 
-```powershell
+`powershell
 .\.venv\Scripts\python.exe scripts\05_embed_to_qdrant.py
-```
+`
 
-### 5. Verify API Gateway
+### 5. Check the chat endpoint
 
-```powershell
-@'
-import requests
-payload = {"query": "What is platform engineering?", "embedding": [0.1] * 384}
-resp = requests.post("http://localhost:8000/api/v1/chat", json=payload, timeout=60)
-print(resp.status_code)
-print(resp.text)
-'@ | .\.venv\Scripts\python.exe -
-```
+`powershell
+python -c "import requests; payload={'query':'What is platform engineering?','embedding':[0.1]*384}; resp=requests.post('http://localhost:8000/api/v1/chat', json=payload, timeout=60); print(resp.status_code); print(resp.text)"
+`
 
 ## Validation
 
 Observability:
 
-```powershell
+`powershell
 .\.venv\Scripts\python.exe scripts\09_verify_observability.py
-```
+`
 
-Production readiness:
+Readiness:
 
-```powershell
+`powershell
 .\.venv\Scripts\python.exe scripts\production_readiness_check.py
-```
+`
 
 Smoke tests:
 
-```powershell
+`powershell
 .\.venv\Scripts\python.exe -m pytest smoke-tests -v
-```
+`
 
-Validated result on this machine:
-- `scripts/production_readiness_check.py`: `10/10 = 100%`
-- `pytest smoke-tests -v`: `8 passed`
+What passed on this machine:
+
+- readiness: 10/10
+- smoke tests: 8 passed
 
 ## Notes
 
-- Prometheus does not scrape Kafka directly on `9092`; that was removed because Kafka is not an HTTP metrics endpoint there.
-- The API Gateway formats retrieval context as plain text before sending it to the remote chat fallback service. Raw object-style context caused remote `404` responses.
-- The local Prefect file remains deployable, but the validated execution path for this environment is the direct container-side run above.
+- Kafka producer access from Windows was unreliable, so scripts/01_ingest_to_kafka.py has a Docker fallback.
+- The API gateway sends plain text context to the remote chat service. Raw object formatting caused failures with the fallback Kaggle endpoint.
+- I kept the Prefect flow file, but for this setup the container-side run is the dependable path.
